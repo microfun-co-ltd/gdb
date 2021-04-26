@@ -39,6 +39,7 @@
 #include "guile/guile.h"
 
 #include <vector>
+#include <to_string.h>
 
 /* Prototypes for local functions.  */
 

@@ -156,6 +156,21 @@ gdb_bfd_ref_ptr gdb_bfd_openr_iovec (const char *filename, const char *target,
 						       void *stream,
 						       struct stat *sb));
 
+gdb_bfd_ref_ptr gdb_bfd_openw_iovec(const char *filename, const char *target,
+	void *(*open_func) (struct bfd *nbfd,
+		void *open_closure),
+	void *open_closure,
+	file_ptr(*pwrite_func) (struct bfd *nbfd,
+		void *stream,
+		const void *buf,
+		file_ptr nbytes,
+		file_ptr offset),
+	int (*close_func) (struct bfd *nbfd,
+		void *stream),
+	int (*stat_func) (struct bfd *abfd,
+		void *stream,
+		struct stat *sb));
+
 /* A wrapper for bfd_openr_next_archived_file that initializes the
    gdb-specific reference count.  */
 

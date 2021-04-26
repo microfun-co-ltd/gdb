@@ -485,6 +485,8 @@ struct opncls
   void *stream;
   file_ptr (*pread) (struct bfd *abfd, void *stream, void *buf,
 		     file_ptr nbytes, file_ptr offset);
+  file_ptr (*pwrite) (struct bfd *abfd, void *stream, const void *buf,
+      file_ptr nbytes, file_ptr offset);
   int (*close) (struct bfd *abfd, void *stream);
   int (*stat) (struct bfd *abfd, void *stream, struct stat *sb);
   file_ptr where;
@@ -523,11 +525,17 @@ opncls_bread (struct bfd *abfd, void *buf, file_ptr nbytes)
 }
 
 static file_ptr
-opncls_bwrite (struct bfd *abfd ATTRIBUTE_UNUSED,
-	      const void *where ATTRIBUTE_UNUSED,
-	      file_ptr nbytes ATTRIBUTE_UNUSED)
+opncls_bwrite (struct bfd *abfd,
+	      const void *buf,
+	      file_ptr nbytes)
 {
-  return -1;
+    struct opncls *vec = (struct opncls *)abfd->iostream;
+    file_ptr nwritten = (vec->pwrite) (abfd, vec->stream, buf, nbytes, vec->where);
+
+    if (nwritten < 0)
+        return nwritten;
+    vec->where += nwritten;
+    return nwritten;
 }
 
 static int
@@ -697,6 +705,61 @@ bfd_openw (const char *filename, const char *target)
   }
 
   return nbfd;
+}
+
+bfd *
+bfd_openw_iovec(const char *filename, const char *target,
+    void *(*open_p) (struct bfd *, void *),
+    void *open_closure,
+    file_ptr(*pwrite_p) (struct bfd *, void *, void const *,
+        file_ptr, file_ptr),
+    int (*close_p) (struct bfd *, void *),
+    int (*stat_p) (struct bfd *, void *, struct stat *))
+{
+    bfd *nbfd;
+    const bfd_target *target_vec;
+    struct opncls *vec;
+    void *stream;
+
+    nbfd = _bfd_new_bfd();
+    if (nbfd == NULL)
+        return NULL;
+
+    target_vec = bfd_find_target(target, nbfd);
+    if (target_vec == NULL)
+    {
+        _bfd_delete_bfd(nbfd);
+        return NULL;
+    }
+
+    /* PR 11983: Do not cache the original filename, but
+       rather make a copy - the original might go away.  */
+    nbfd->filename = bfd_strdup(filename);
+    if (nbfd->filename == NULL)
+    {
+        _bfd_delete_bfd(nbfd);
+        return NULL;
+    }
+    nbfd->direction = write_direction;
+
+    /* `open_p (...)' would get expanded by an the open(2) syscall macro.  */
+    stream = (*open_p) (nbfd, open_closure);
+    if (stream == NULL)
+    {
+        _bfd_delete_bfd(nbfd);
+        return NULL;
+    }
+
+    vec = (struct opncls *)bfd_zalloc(nbfd, sizeof(struct opncls));
+    vec->stream = stream;
+    vec->pwrite = pwrite_p;
+    vec->close = close_p;
+    vec->stat = stat_p;
+
+    nbfd->iovec = &opncls_iovec;
+    nbfd->iostream = vec;
+
+    return nbfd;
 }
 
 static inline void
