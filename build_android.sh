@@ -74,8 +74,8 @@ esac
 
 export PATH=${NDK_DIR}/toolchains/${TOOLCHAIN_DIR}/prebuilt/linux-x86_64/${BUILD_ARCH}/bin:${NDK_DIR}/toolchains/${TOOLCHAIN_DIR}/prebuilt/linux-x86_64/bin:$PATH
 
-export LDFLAGS="-pie -Wl,--gc-sections --sysroot=${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR} -L${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR}/usr/lib -L${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR}/usr/lib -L${NDK_DIR}/toolchains/${TOOLCHAIN_DIR}/prebuilt/linux-x86_64/lib/gcc/${BUILD_ARCH}/4.9.x -L${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/libs/${TARGET_ARCH}"
-export CFLAGS="${GCC_ARCH} -D__ANDROID_API__=${API_LEVEL} -g -DANDROID -Os -fdata-sections -ffunction-sections -Wl,--gc-sections -fPIE --sysroot=${NDK_DIR}/sysroot -I${NDK_DIR}/sysroot/usr/include/${BUILD_ARCH} -I${NDK_DIR}/sysroot/usr/include -I${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/include -I${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/libs/${TARGET_ARCH}/include"
+export LDFLAGS="-pie -Wl,--gc-sections --sysroot=${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR} -L${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR}/usr/lib -L${NDK_DIR}/platforms/android-${API_LEVEL}/${NDK_LIB_DIR}/usr/lib -L${NDK_DIR}/toolchains/${TOOLCHAIN_DIR}/prebuilt/linux-x86_64/lib/gcc/${BUILD_ARCH}/4.9.x -L${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/libs/${TARGET_ARCH} -Lzstd/build/cmake/build_${TARGET_ARCH}/lib"
+export CFLAGS="${GCC_ARCH} -D__ANDROID_API__=${API_LEVEL} -g -DANDROID -Os -fdata-sections -ffunction-sections -Wl,--gc-sections -fPIE --sysroot=${NDK_DIR}/sysroot -I${NDK_DIR}/sysroot/usr/include/${BUILD_ARCH} -I${NDK_DIR}/sysroot/usr/include -I${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/include -I${NDK_DIR}/sources/cxx-stl/gnu-libstdc++/4.9/libs/${TARGET_ARCH}/include -Izstd/lib"
 export CXXFLAGS="-std=c++11 $CFLAGS"
 export CPPFLAGS="$CFLAGS"
 
@@ -112,7 +112,7 @@ make -j4 V=1 \
   CFLAGS="$CFLAGS" \
   CXXFLAGS="$CXXFLAGS" \
   LDFLAGS="$LDFLAGS" \
-  XM_CLIBS="-lsupc++ -lgnustl_static -lstdc++ -lgcc -lc" \
+  XM_CLIBS="-lzstd -lsupc++ -lgnustl_static -lstdc++ -lgcc -lc" \
   $* | tee build.log
 
 

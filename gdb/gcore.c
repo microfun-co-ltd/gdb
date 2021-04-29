@@ -41,7 +41,7 @@
 #include "gdbsupport/gdb_unlinker.h"
 #include "gdbsupport/byte-vector.h"
 #include "gdbsupport/scope-exit.h"
-#include "zlib.h"
+#include "zstd.h"
 
 /* The largest amount of memory to read from the target at once.  We
    must throttle it to limit the amount of memory used by GDB during
@@ -87,11 +87,8 @@ struct compressed_core_segment
     // Real file descriptor of current writing segment
     int fd;
 
-    // CRC32 of current writing segment, the final CRC32 can be computed using crc32_combine().
-    unsigned long crc32;
-
-    // The ZLIB compressor
-    z_stream compr;
+    // The ZSTD compressor
+    ZSTD_CStream * compr;
 
     // Current write offset in the virtual file
     long long offset;
@@ -153,7 +150,8 @@ open_gcore_dir(struct bfd *abfd, void * ctx)
     pStream->mutex = PTHREAD_MUTEX_INITIALIZER;
 
     // Initialize compressor for segment 0
-    if (deflateInit2(&pStream->segs[0].compr, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+    pStream->segs[0].compr = ZSTD_createCStream();
+    if (pStream->segs[0].compr == NULL)
     {
         return NULL;
     }
@@ -163,7 +161,6 @@ open_gcore_dir(struct bfd *abfd, void * ctx)
         pStream->segs[i].parent = pStream;
         pStream->segs[i].seq = -1;
         pStream->segs[i].fd = -1;
-        pStream->segs[i].crc32 = 0;
         pStream->segs[i].offset = -1;
         pStream->segs[i].startOffset = -1;
         pStream->segs[i].startSectOffset = 0;
@@ -176,7 +173,7 @@ open_gcore_dir(struct bfd *abfd, void * ctx)
     const char * pcszDirPathName = bfd_get_filename(abfd);
     if (mkdir(pcszDirPathName, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0)
     {
-        deflateEnd(&pStream->segs[0].compr);
+        ZSTD_freeCStream(pStream->segs[0].compr);
         free(pStream);
         return NULL;
     }
@@ -187,32 +184,38 @@ open_gcore_dir(struct bfd *abfd, void * ctx)
 static void
 close_gcore_segment(struct bfd * pBbfd, struct compressed_core_segment * pStream)
 {
-    pStream->compr.next_in = (Bytef *)pStream; // Just anything not NULL
-    pStream->compr.avail_in = 0;
+    // Publish the input data to compressor
+    ZSTD_inBuffer inCtrl;
+    inCtrl.src = NULL;
+    inCtrl.size = 0;
+    inCtrl.pos = 0;
 
-    // Flush deflate stream
+    // Flush zstd stream
     for (;;)
     {
-        pStream->compr.next_out = (Bytef *)pStream->outBuf;
-        pStream->compr.avail_out = sizeof(pStream->outBuf);
-        if (deflate(&pStream->compr, Z_FULL_FLUSH) != Z_OK)
+        ZSTD_outBuffer outCtrl;
+        outCtrl.dst = pStream->outBuf;
+        outCtrl.size = sizeof(pStream->outBuf);
+        outCtrl.pos = 0;
+        
+        size_t stBytesPending = ZSTD_compressStream2(pStream->compr, &outCtrl, &inCtrl, ZSTD_e_end);
+        if (ZSTD_isError(stBytesPending))
         { // Z_STREAM_END only when Z_FINISH, Z_STREAM_ERROR when next_in/next_out is NULL, Z_BUF_ERROR when input avail_in/avail_out is 0, all impossible.
             break;
         }
 
         // Write compressed data in output buffer to disk file.
-        if (pStream->compr.avail_out < sizeof(pStream->outBuf))
+        if (outCtrl.pos > 0)
         {
-            size_t stToWrite = sizeof(pStream->outBuf) - pStream->compr.avail_out;
-            ssize_t sstWritten = write(pStream->fd, pStream->outBuf, stToWrite);
-            if (sstWritten != stToWrite)
+            ssize_t sstWritten = write(pStream->fd, outCtrl.dst, outCtrl.pos);
+            if (sstWritten != outCtrl.pos)
             {
                 break;
             }
         }
 
-        // If the output buffer is filled to full, there may be more data to output, try another round.
-        if (pStream->compr.avail_out == 0)
+        // If there is still data left in streaming context, run another round.
+        if (stBytesPending != 0)
         {
             continue;
         }
@@ -235,7 +238,7 @@ close_gcore_segment(struct bfd * pBbfd, struct compressed_core_segment * pStream
 
     // Construct new (full) file name
     char * pszDstFileName = pszSrcFileName + i32Chars + 1;
-    i32Chars = snprintf(pszDstFileName, sizeof(pStream->outBuf) - i32Chars - 1, "%s.%lld.%08lX", pszSrcFileName, pStream->offset, pStream->crc32);
+    i32Chars = snprintf(pszDstFileName, sizeof(pStream->outBuf) - i32Chars - 1, "%s.%lld", pszSrcFileName, pStream->offset);
     if (i32Chars >= sizeof(pStream->outBuf) - i32Chars - 1)
     {
         return;
@@ -272,7 +275,6 @@ fast_gcore_open_segment(struct bfd *nbfd, struct compressed_core_segment * pSeg,
 
     pSeg->startOffset = offset;
     pSeg->offset = offset;
-    pSeg->crc32 = crc32(0L, Z_NULL, 0);
 
     return 1;
 }
@@ -290,7 +292,8 @@ fast_gcore_write_segment(struct bfd *nbfd, struct compressed_core_segment * pSeg
             }
             close_gcore_segment(nbfd, pSeg);
 
-            deflateReset(&pSeg->compr);
+            // Reset the compressor
+            ZSTD_initCStream(pSeg->compr, ZSTD_CLEVEL_DEFAULT);
 
             // NOTE: This should not be reached in parallel mode
             pthread_mutex_lock(&pSeg->parent->mutex);
@@ -305,29 +308,33 @@ fast_gcore_write_segment(struct bfd *nbfd, struct compressed_core_segment * pSeg
     }
 
     // Publish the input data to compressor
-    pSeg->compr.next_in = (Bytef *)buf;
-    pSeg->compr.avail_in = (uInt)nbytes;
+    ZSTD_inBuffer inCtrl;
+    inCtrl.src = buf;
+    inCtrl.size = nbytes;
+    inCtrl.pos = 0;
 
     // Compress.
-    // NOTE: When avail_in == 0, it is possible if we do another round, we can get more output. But we will leave that to next call of this function.
+    // NOTE: We do not care whehter there is still data in streaming context can be flushed to output.
     //       Here the only important thing is to consume the input data, not write output as much as possible.
-    while (pSeg->compr.avail_in > 0)
+    while (inCtrl.pos < inCtrl.size)
     {
-        pSeg->compr.next_out = (Bytef *)pSeg->outBuf;
-        pSeg->compr.avail_out = sizeof(pSeg->outBuf);
+        ZSTD_outBuffer outCtrl;
+        outCtrl.dst = pSeg->outBuf;
+        outCtrl.size = sizeof(pSeg->outBuf);
+        outCtrl.pos = 0;
 
-        if (deflate(&pSeg->compr, Z_NO_FLUSH) != Z_OK)
+        size_t stBytesToFlush = ZSTD_compressStream2(pSeg->compr, &outCtrl, &inCtrl, ZSTD_e_continue);
+        if (ZSTD_isError(stBytesToFlush))
         { // Z_STREAM_END only when Z_FINISH, Z_STREAM_ERROR when next_in/next_out is NULL, Z_BUF_ERROR when input avail_in/avail_out is 0, all impossible.
             warning(_("Failed to compress data for segment #%zu with seq %d and offset %lld ~ %lld when writing to %lld\n"), pSeg - pSeg->parent->segs, pSeg->seq, pSeg->startOffset, pSeg->offset, offset);
             return 0;
         }
 
         // Write compressed data in output buffer to disk file.
-        if (pSeg->compr.avail_out < sizeof(pSeg->outBuf))
+        if (outCtrl.pos > 0)
         {
-            size_t stToWrite = sizeof(pSeg->outBuf) - pSeg->compr.avail_out;
-            ssize_t sstWritten = write(pSeg->fd, pSeg->outBuf, stToWrite);
-            if (sstWritten != stToWrite)
+            ssize_t sstWritten = write(pSeg->fd, outCtrl.dst, outCtrl.pos);
+            if (sstWritten != outCtrl.pos)
             {
                 warning(_("Failed to write data for segment #%zu with seq %d and offset %lld ~ %lld when writing to %lld\n"), pSeg - pSeg->parent->segs, pSeg->seq, pSeg->startOffset, pSeg->offset, offset);
                 return 0;
@@ -343,9 +350,6 @@ fast_gcore_write_segment(struct bfd *nbfd, struct compressed_core_segment * pSeg
     {
         pSeg->parent->length = pSeg->offset;
     }
-
-    // Update CRC32
-    pSeg->crc32 = crc32(pSeg->crc32, (const Bytef *)buf, nbytes);
 
     return 1;
 }
@@ -544,7 +548,7 @@ fast_gcore_flush_segments(struct bfd *nbfd, struct compressed_core_file * pStrea
     {
         close_gcore_segment(nbfd, pStream->segs);
 
-        deflateReset(&pStream->segs[0].compr);
+        ZSTD_initCStream(pStream->segs[0].compr, ZSTD_CLEVEL_DEFAULT);
     }
 
     // Split the sections to number of CPU groups
@@ -632,16 +636,17 @@ fast_gcore_flush_segments(struct bfd *nbfd, struct compressed_core_file * pStrea
         pStream->segs[i].parent = pStream;
         pStream->segs[i].seq = ++pStream->seq;
         pStream->segs[i].fd = -1;
-        pStream->segs[i].crc32 = 0;
         pStream->segs[i].offset = -1;
         pStream->segs[i].startOffset = -1;
         pStream->segs[i].startSectOffset = aui64SegmentOffsets[i];
         pStream->segs[i].startSect = aSegmentStarts[i];
         pStream->segs[i].pLastWrite = NULL;
 
+        // The [0] segment is already initialized, so only initialize the others here.
         if (i > 0)
         {
-            if (deflateInit2(&pStream->segs[i].compr, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+            pStream->segs[i].compr = ZSTD_createCStream();
+            if (pStream->segs[i].compr == NULL)
             {
                 bFail = true;
                 break;
@@ -688,7 +693,7 @@ close_gcore_dir(struct bfd *nbfd, void *stream)
             close_gcore_segment(nbfd, pStream->segs + i);
         }
 
-        deflateEnd(&pStream->segs[i].compr);
+        ZSTD_freeCStream(pStream->segs[i].compr);
     }
 
     free(pStream);
